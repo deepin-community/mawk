@@ -1,6 +1,6 @@
 /********************************************
 zmalloc.c
-copyright 2008-2013,2019, Thomas E. Dickey
+copyright 2008-2023,2024, Thomas E. Dickey
 copyright 1991-1993,1995, Michael D. Brennan
 
 This is a source file for mawk, an implementation of
@@ -11,12 +11,12 @@ the GNU General Public License, version 2, 1991.
 ********************************************/
 
 /*
- * $MawkId: zmalloc.c,v 1.31 2019/01/30 01:30:02 tom Exp $
+ * $MawkId: zmalloc.c,v 1.35 2024/08/25 17:18:07 tom Exp $
  */
 
 /*  zmalloc.c  */
-#include  "mawk.h"
-#include  "zmalloc.h"
+#include  <mawk.h>
+#include  <zmalloc.h>
 
 #if defined(NO_LEAKS) && defined(HAVE_TSEARCH)
 #define USE_TSEARCH 1
@@ -33,21 +33,18 @@ the GNU General Public License, version 2, 1991.
 #define BlocksToBytes(size) ((size) << ZSHIFT)
 
 /*
-  zmalloc() gets mem from malloc() in CHUNKS of 2048 bytes
-  and cuts these blocks into smaller pieces that are multiples
-  of eight bytes.  When a piece is returned via zfree(), it goes
-  on a linked linear list indexed by its size.	The lists are
-  an array, pool[].
+ * zmalloc() gets memory from malloc() in chunks and cuts these blocks into
+ * smaller pieces that are multiples of eight bytes.  When a piece is returned
+ * via zfree(), it goes on a linked linear list indexed by its size.  The lists
+ * are an array, pool[].
+ *
+ * For examples, if you ask for 22 bytes with p = zmalloc(22), you actually get
+ * a piece of size 24.  When you free it with zfree(p,22), it is added to the
+ * list at pool[2].
+ */
 
-  E.g., if you ask for 22 bytes with p = zmalloc(22), you actually get
-  a piece of size 24.  When you free it with zfree(p,22) , it is added
-  to the list at pool[2].
-*/
-
-#define POOLSZ	    16
-
-#define	 CHUNK		256
- /* number of blocks to get from malloc */
+#define POOLSZ	        16	/* size of zmalloc's pool[] array */
+#define	CHUNK		256	/* number of ZBLOCKSZ's to get from malloc */
 
 /*****************************************************************************/
 
@@ -287,7 +284,11 @@ zrealloc(PTR p, size_t old_size, size_t new_size)
 {
     register PTR q;
 
-    TRACE(("zrealloc %p %lu ->%lu\n", p, old_size, new_size));
+    TRACE(("zrealloc %p %lu ->%lu\n",
+	   p,
+	   (unsigned long) old_size,
+	   (unsigned long) new_size));
+
     if (new_size > (BlocksToBytes(POOLSZ)) &&
 	old_size > (BlocksToBytes(POOLSZ))) {
 	if (!(q = realloc(p, new_size))) {

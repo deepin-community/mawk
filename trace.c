@@ -1,6 +1,6 @@
 /********************************************
 trace.c
-copyright 2012-2016,2019 Thomas E. Dickey
+copyright 2012-2023,2024 Thomas E. Dickey
 
 This is a source file for mawk, an implementation of
 the AWK programming language.
@@ -10,10 +10,13 @@ the GNU General Public License, version 2, 1991.
 ********************************************/
 
 /*
- * $MawkId: trace.c,v 1.16 2019/02/02 02:02:33 tom Exp $
+ * $MawkId: trace.c,v 1.24 2024/09/05 17:44:48 tom Exp $
  */
+
+#define Visible_CELL
+#define Visible_STRING
+
 #include <mawk.h>
-#include <repl.h>
 #include <code.h>
 
 static FILE *trace_fp;
@@ -68,7 +71,9 @@ TraceCell(CELL *cp)
 	    TRACE(("split on the empty string\n"));
 	    break;
 	case C_RE:
-	    TRACE(("a regular expression at %p: %s\n", cp->ptr, re_uncompile(cp->ptr)));
+	    TRACE(("a regular expression at %p: ", cp->ptr));
+	    da_string(trace_fp, re_uncompile(cp->ptr), '/');
+	    fputc('\n', trace_fp);
 	    break;
 	case C_REPL:
 	    TRACE(("a replacement string at %p: ", cp->ptr));
@@ -90,12 +95,11 @@ TraceCell(CELL *cp)
 }
 
 void
-TraceFunc(const char *name, CELL *sp)
+TraceFunc(const char *name, CELL *sp, int nargs)
 {
-    int nargs = sp->type;
     int n;
 
-    TRACE(("** %s <-%p\n", name, (void *) sp));
+    TRACE(("** %s <-%p (%ld)\n", name, (void *) sp, (long) nargs));
     for (n = 0; n < nargs; ++n) {
 	TRACE(("...arg%d: ", n));
 	TraceCell(sp + n - nargs);
@@ -121,6 +125,7 @@ TraceInst(INST * p, INST * base)
 	case _PRINT:
 	    TRACE(("\tPF_CP *%p\n", p->ptr));
 	    break;
+	case _CALLX:
 	case _CALL:
 	    TRACE(("\tFBLOCK *%p\n", p->ptr));
 	    break;
@@ -144,7 +149,6 @@ TraceInst(INST * p, INST * base)
 	case ALOOP:
 	case A_CAT:
 	case A_DEL:
-	case A_LENGTH:
 	case A_TEST:
 	case DEL_A:
 	case FE_PUSHA:
@@ -166,6 +170,8 @@ TraceInst(INST * p, INST * base)
 	case LA_PUSHA:
 	case L_PUSHA:
 	case L_PUSHI:
+	case _LENGTH:
+	case A_LENGTH:
 	case NF_PUSHI:
 	case OL_GL:
 	case OL_GL_NR:
