@@ -1,7 +1,7 @@
 /********************************************
 fin.c
-copyright 2008-2018,2020.  Thomas E. Dickey
-copyright 1991-1995,1996.  Michael D. Brennan
+copyright 2008-2023,2024, Thomas E. Dickey
+copyright 1991-1995,1996, Michael D. Brennan
 
 This is a source file for mawk, an implementation of
 the AWK programming language.
@@ -11,18 +11,22 @@ the GNU General Public License, version 2, 1991.
 ********************************************/
 
 /*
- * $MawkId: fin.c,v 1.47 2020/01/20 01:56:30 tom Exp $
+ * $MawkId: fin.c,v 1.57 2024/09/05 17:38:30 tom Exp $
  */
 
-/* fin.c */
+#define Visible_CELL
+#define Visible_FIN
+#define Visible_SEPARATOR
+#define Visible_STRING
+#define Visible_SYMTAB
 
-#include "mawk.h"
-#include "fin.h"
-#include "memory.h"
-#include "bi_vars.h"
-#include "field.h"
-#include "symtype.h"
-#include "scan.h"
+#include <mawk.h>
+#include <fin.h>
+#include <memory.h>
+#include <bi_vars.h>
+#include <field.h>
+#include <symtype.h>
+#include <scan.h>
 
 #ifdef	  HAVE_FCNTL_H
 #include <fcntl.h>
@@ -32,6 +36,17 @@ the GNU General Public License, version 2, 1991.
    buffering and (most important) splitting files into
    records, FINgets().
 */
+
+/*
+ * An input buffer can grow much larger than the memory pool, and the number
+ * of open files is fairly constrained.  We allow for that in zmalloc(), by
+ * bypassing the memory pool.
+ */
+#ifdef MSDOS
+#define JUMPSZ BUFFSZ
+#else
+#define JUMPSZ (BUFFSZ * 64)
+#endif
 
 static FIN *next_main(int);
 static char *enlarge_fin_buffer(FIN *);
@@ -47,7 +62,7 @@ static void
 free_fin_data(FIN * fin)
 {
     if (fin != &dead_main) {
-	zfree(fin->buff, (size_t) (fin->nbuffs * BUFFSZ + 1));
+	zfree(fin->buff, fin->buff_size);
 	ZFREE(fin);
     }
 }
@@ -62,9 +77,9 @@ FINdopen(int fd, int main_flag)
 
     fin->fd = fd;
     fin->flags = main_flag ? (MAIN_FLAG | START_FLAG) : START_FLAG;
-    fin->buffp = fin->buff = (char *) zmalloc((size_t) BUFFSZ + 1);
+    fin->buff_size = JUMPSZ;
+    fin->buffp = fin->buff = (char *) zmalloc(fin->buff_size);
     fin->limit = fin->buffp;
-    fin->nbuffs = 1;
     fin->buff[0] = 0;
 
     if ((isatty(fd) && rs_shadow.type == SEP_CHAR && rs_shadow.c == '\n')
@@ -125,7 +140,7 @@ FINsemi_close(FIN * fin)
     static char dead = 0;
 
     if (fin->buff != &dead) {
-	zfree(fin->buff, (size_t) (fin->nbuffs * BUFFSZ + 1));
+	zfree(fin->buff, fin->buff_size);
 
 	if (fin->fd) {
 	    if (fin->fp)
@@ -213,17 +228,10 @@ FINgets(FIN * fin, size_t *len_p)
 			 * space.  Doing it this way assumes very-long lines
 			 * are rare.
 			 */
-			size_t old_size = (size_t) (fin->nbuffs++ * BUFFSZ + 1);
-			size_t new_size = old_size + BUFFSZ;
-			char *new_buff = (char *) zmalloc(new_size);
 			size_t my_size = (size_t) (p - fin->buff);
-			if (new_buff != fin->buff) {
-			    memcpy(new_buff, fin->buff, my_size);
-			    zfree(fin->buff, old_size);
-			    fin->buff = new_buff;
-			}
-			my_buff = my_size + fin->buff;
-			p = my_buff;
+
+			enlarge_fin_buffer(fin);
+			p = my_buff = my_size + fin->buff;
 			got_any = 1;
 		    }
 		}
@@ -239,13 +247,13 @@ FINgets(FIN * fin, size_t *len_p)
 	    return fin->buff;
 	} else {
 	    /* block buffering */
-	    r = fillbuff(fin->fd, fin->buff, (size_t) (fin->nbuffs * BUFFSZ));
+	    r = fillbuff(fin->fd, fin->buff, fin->buff_size);
 	    if (r == 0) {
 		fin->flags |= EOF_FLAG;
 		fin->buffp = fin->buff;
 		fin->limit = fin->buffp;
 		goto restart;	/* might be main */
-	    } else if (r < fin->nbuffs * BUFFSZ) {
+	    } else if (r < fin->buff_size) {
 		fin->flags |= EOF_FLAG;
 	    }
 
@@ -277,13 +285,13 @@ FINgets(FIN * fin, size_t *len_p)
     case SEP_STR:
 	q = str_str(p,
 		    (size_t) (fin->limit - p),
-		    ((STRING *) rs_shadow.ptr)->str,
-		    match_len = ((STRING *) rs_shadow.ptr)->len);
+		    rs_shadow.u.s_ptr->str,
+		    match_len = (rs_shadow.u.s_ptr)->len);
 	break;
 
     case SEP_MLR:
     case SEP_RE:
-	q = re_pos_match(p, (size_t) (fin->limit - p), rs_shadow.ptr,
+	q = re_pos_match(p, (size_t) (fin->limit - p), rs_shadow.u.r_ptr,
 			 &match_len,
 			 (p != fin->buff) ||
 			 (fin->flags & FIN_FLAG));
@@ -328,18 +336,17 @@ FINgets(FIN * fin, size_t *len_p)
 	/* move a partial line to front of buffer and try again */
 	size_t rr;
 	size_t amount = (size_t) (fin->limit - p);
-	size_t blocks = fin->nbuffs * BUFFSZ;
 
 	fin->flags |= FIN_FLAG;
 	r = amount;
-	if (blocks < r) {
+	if (fin->buff_size < r) {
 	    fin->flags |= EOF_FLAG;
 	    return 0;
 	}
 
 	p = (char *) memmove(fin->buff, p, r);
 	q = p + r;
-	rr = blocks - r;
+	rr = fin->buff_size - r;
 
 	if ((r = fillbuff(fin->fd, q, rr)) < rr) {
 	    fin->flags |= EOF_FLAG;
@@ -353,34 +360,36 @@ static char *
 enlarge_fin_buffer(FIN * fin)
 {
     size_t r;
-    size_t oldsize = fin->nbuffs * BUFFSZ + 1;
+    size_t oldsize = fin->buff_size;
+    size_t newsize = ((oldsize < JUMPSZ)
+		      ? (oldsize * 2)
+		      : (oldsize + JUMPSZ));
     size_t limit = (size_t) (fin->limit - fin->buff);
+    size_t extra = (newsize - oldsize);
 
 #ifdef  MSDOS
     /* I'm not sure this can really happen:
        avoid "16bit wrap" */
-    if (fin->nbuffs == MAX_BUFFS) {
+    if (fin->buff_size >= MAX_BUFFS) {
 	errmsg(0, "out of input buffer space");
 	mawk_exit(2);
     }
 #endif
 
+    fin->buff_size = newsize;
     fin->buffp =
-	fin->buff = (char *) zrealloc(fin->buff, oldsize, oldsize + BUFFSZ);
-    fin->nbuffs++;
+	fin->buff = (char *) zrealloc(fin->buff, oldsize, newsize);
 
-    r = fillbuff(fin->fd, fin->buff + (oldsize - 1), (size_t) BUFFSZ);
-    if (r < BUFFSZ)
-	fin->flags |= EOF_FLAG;
-
-    fin->limit = fin->buff + limit + r;
+    if (fin->fp == 0) {
+	r = fillbuff(fin->fd, fin->buff + oldsize, extra);
+	if (r < extra)
+	    fin->flags |= EOF_FLAG;
+	fin->limit = fin->buff + limit + r;
+    }
     return fin->buff;
 }
 
-/*--------
-  target is big enough to hold size + 1 chars
-  on exit the back of the target is zero terminated
- *--------------*/
+/* fill the target with at most the number of bytes requested */
 size_t
 fillbuff(int fd, char *target, size_t size)
 {
@@ -403,7 +412,6 @@ fillbuff(int fd, char *target, size_t size)
 	}
 
   out:
-    *target = 0;
     return (size_t) (entry_size - size);
 }
 
@@ -461,7 +469,6 @@ open_main(void)
 static FIN *
 next_main(int open_flag)	/* called by open_main() if on */
 {
-    register CELL *cp;
     CELL argc;			/* copy of ARGC */
     CELL c_argi;		/* cell copy of argi */
     CELL argval;		/* copy of ARGV[c_argi] */
@@ -482,6 +489,8 @@ next_main(int open_flag)	/* called by open_main() if on */
 	cast1_to_d(&argc);
 
     while (argi < argc.dval) {
+	register CELL *cp;
+
 	c_argi.dval = argi;
 	argi += 1.0;
 
@@ -507,7 +516,7 @@ next_main(int open_flag)	/* called by open_main() if on */
 	/* try to open it -- we used to continue on failure,
 	   but posix says we should quit */
 	if (!(main_fin = FINopen(string(cp)->str, 1))) {
-	    errmsg(errno, "cannot open %s", string(cp)->str);
+	    errmsg(errno, "cannot open \"%s\"", string(cp)->str);
 	    mawk_exit(2);
 	}
 
@@ -542,13 +551,16 @@ next_main(int open_flag)	/* called by open_main() if on */
 int
 is_cmdline_assign(char *s)
 {
+    static CELL empty_cell;
+
     register char *p;
+
     int c;
     SYMTAB *stp;
     CELL *cp = 0;
     size_t len;
-    CELL cell;			/* used if command line assign to pseudo field */
-    CELL *fp = (CELL *) 0;	/* ditto */
+    CELL cell = empty_cell;	/* used if command line assign to pseudo field */
+    CELL *fp = NULL;		/* ditto */
     size_t length;
 
     if (scan_code[*(unsigned char *) s] != SC_IDCHAR)

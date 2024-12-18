@@ -1,6 +1,6 @@
 /********************************************
 execute.c
-copyright 2008-2017,2018, Thomas E. Dickey
+copyright 2008-2023,2024, Thomas E. Dickey
 copyright 1991-1995,1996, Michael D. Brennan
 
 This is a source file for mawk, an implementation of
@@ -11,20 +11,28 @@ the GNU General Public License, version 2, 1991.
 ********************************************/
 
 /*
- * $MawkId: execute.c,v 1.44 2018/11/15 01:20:01 tom Exp $
+ * $MawkId: execute.c,v 1.62 2024/09/05 17:44:48 tom Exp $
  */
 
-#include "mawk.h"
-#include "files.h"
-#include "code.h"
-#include "memory.h"
-#include "symtype.h"
-#include "field.h"
-#include "bi_funct.h"
-#include "bi_vars.h"
-#include "regexp.h"
-#include "repl.h"
-#include "fin.h"
+#define Visible_ARRAY
+#define Visible_BI_REC
+#define Visible_CELL
+#define Visible_DEFER_LEN
+#define Visible_FBLOCK
+#define Visible_RE_DATA
+#define Visible_STRING
+#define Visible_SYMTAB
+
+#include <mawk.h>
+#include <files.h>
+#include <code.h>
+#include <memory.h>
+#include <symtype.h>
+#include <field.h>
+#include <bi_funct.h>
+#include <bi_vars.h>
+#include <regexp.h>
+#include <fin.h>
 
 #include <math.h>
 
@@ -36,19 +44,18 @@ static char dz_msg[] = "division by zero";
 #define	 CHECK_DIVZERO(x) do { if ((x) == 0.0 ) rt_error(dz_msg); } while (0)
 #endif
 
-#define	 inc_sp()   if ( ++sp == stack_danger) eval_overflow()
-#define  dec_sp()   if ( sp-- == (stack_base - 1)) eval_underflow()
-
 #define	 SAFETY	   16
-#define	 DANGER	   (EVAL_STACK_SIZE-SAFETY)
+#define	 DANGER	   (EVAL_STACK_SIZE - SAFETY - MAX_ARGS)
 
 /*  The stack machine that executes the code */
 
 CELL eval_stack[EVAL_STACK_SIZE];
 /* these can move for deep recursion */
 static CELL *stack_base = eval_stack;
+static CELL *stack_under = eval_stack;
 static CELL *stack_danger = eval_stack + DANGER;
 
+#ifdef DEBUG
 static void
 eval_overflow(void)
 {
@@ -60,6 +67,16 @@ eval_underflow(void)
 {
     bozo("eval stack underflow");
 }
+
+#define	 inc_sp()   if ( ++sp == stack_danger) eval_overflow()
+#define  dec_sp()   if ( sp-- == stack_under)  eval_underflow()
+
+#else
+
+#define	 inc_sp()   ++sp
+#define  dec_sp()   sp--
+
+#endif
 
 /* holds info for array loops (on a stack) */
 typedef struct aloop_state {
@@ -99,9 +116,7 @@ clear_aloop_stack(ALOOP_STATE * top)
     } while (top);
 }
 
-static INST *restart_label;	/* control flow labels */
-INST *next_label;
-static CELL tc;			/*useful temp */
+INST *next_label;		/* control flow label */
 
 void
 execute(INST * cdp,		/* code ptr, start execution here */
@@ -109,10 +124,14 @@ execute(INST * cdp,		/* code ptr, start execution here */
 	CELL *fp)		/* frame ptr into eval_stack for
 				   user defined functions */
 {
+    static INST *restart_label;	/* control flow label */
+    static CELL tc;		/* useful temp */
+    static CELL missing;	/* no value (use zero) */
+
     /* some useful temporaries */
     CELL *cp;
     int t;
-    unsigned tu;
+    UInt tu;
 
     /* save state for array loops via a stack */
     ALOOP_STATE *aloop_state = (ALOOP_STATE *) 0;
@@ -122,7 +141,15 @@ execute(INST * cdp,		/* code ptr, start execution here */
     CELL *old_sp = 0;
 
 #ifdef	DEBUG
-    CELL *entry_sp = sp;
+    CELL *entry_sp;
+#endif
+
+    if (sp == NULL) {
+	stack_under = stack_base;
+	sp = --stack_under;
+    }
+#ifdef	DEBUG
+    entry_sp = sp;
 #endif
 
     if (fp) {
@@ -147,7 +174,7 @@ execute(INST * cdp,		/* code ptr, start execution here */
 	TRACE(("execute %s sp(%ld:%s)\n",
 	       da_op_name(cdp),
 	       (long) (sp - stack_base),
-	       da_type_name(sp)));
+	       (sp == stack_under) ? "?" : da_type_name(sp)));
 
 	switch ((cdp++)->op) {
 
@@ -217,14 +244,18 @@ execute(INST * cdp,		/* code ptr, start execution here */
 	case L_PUSHI:
 	    /* put the contents of a local var on stack,
 	       cdp->op holds the offset from the frame pointer */
-	    inc_sp();
-	    cellcpy(sp, fp + (cdp++)->op);
+	    if (fp != NULL) {
+		inc_sp();
+		cellcpy(sp, fp + (cdp++)->op);
+	    }
 	    break;
 
 	case L_PUSHA:
 	    /* put a local address on eval stack */
-	    inc_sp();
-	    sp->ptr = (PTR) (fp + (cdp++)->op);
+	    if (fp != NULL) {
+		inc_sp();
+		sp->ptr = (PTR) (fp + (cdp++)->op);
+	    }
 	    break;
 
 	case F_PUSHI:
@@ -348,6 +379,69 @@ execute(INST * cdp,		/* code ptr, start execution here */
 		inc_sp();
 		sp->ptr = fp[(cdp++)->op].ptr;
 	    }
+	    break;
+
+	case A_LENGTH:
+	    /* parameter for length() was ST_NONE; improve it here */
+	    {
+		SYMTAB *stp = (SYMTAB *) cdp->ptr;
+		cdp--;
+		TRACE(("patch/alen %s\n", type_to_str(stp->type)));
+		switch (stp->type) {
+		case ST_VAR:
+		    cdp[0].op = _PUSHI;
+		    cdp[1].ptr = stp->stval.cp;
+		    break;
+		case ST_ARRAY:
+		    cdp[0].op = A_PUSHA;
+		    cdp[1].ptr = stp->stval.array;
+		    assert(cdp[2].op == _BUILTIN);
+		    cdp[3].fnc = bi_alength;
+		    break;
+		case ST_NONE:
+		    cdp[0].op = _PUSHI;
+		    cdp[1].ptr = &missing;
+		    break;
+		default:
+		    bozo("execute A_LENGTH");
+		    /* NOTREACHED */
+		}
+	    }
+	    /* resume, interpreting the updated code */
+	    break;
+
+	case _LENGTH:
+	    /* parameter for length() was ST_LOCAL_NONE; improve it here */
+	    {
+		DEFER_LEN *dl = (DEFER_LEN *) cdp->ptr;
+		FBLOCK *fbp = dl->fbp;
+		short offset = dl->offset;
+		int type = fbp->typev[offset];
+
+		ZFREE(dl);
+		cdp--;
+		TRACE(("patch/len %s\n", type_to_str(type)));
+		switch (type) {
+		case ST_LOCAL_VAR:
+		    cdp[0].op = L_PUSHI;
+		    cdp[1].op = offset;
+		    break;
+		case ST_LOCAL_ARRAY:
+		    cdp[0].op = LA_PUSHA;
+		    cdp[1].op = offset;
+		    assert(cdp[2].op == _BUILTIN);
+		    cdp[3].fnc = bi_alength;
+		    break;
+		case ST_LOCAL_NONE:
+		    cdp[0].op = _PUSHI;
+		    cdp[1].ptr = &missing;
+		    break;
+		default:
+		    bozo("execute _LENGTH");
+		    /* NOTREACHED */
+		}
+	    }
+	    /* resume, interpreting the updated code */
 	    break;
 
 	case SET_ALOOP:
@@ -536,8 +630,6 @@ execute(INST * cdp,		/* code ptr, start execution here */
 	    sp->type = C_DOUBLE;
 	    sp->dval = cp->dval;
 	    break;
-
-	    /* will anyone ever use these ? */
 
 	case F_ADD_ASG:
 	    if (sp->type != C_DOUBLE)
@@ -817,7 +909,7 @@ execute(INST * cdp,		/* code ptr, start execution here */
 
 	case _BUILTIN:
 	case _PRINT:
-	    sp = (*(PF_CP) (cdp++)->ptr) (sp);
+	    sp = (*(cdp++)->fnc) (sp);
 	    break;
 
 	case _POST_INC:
@@ -1028,12 +1120,6 @@ execute(INST * cdp,		/* code ptr, start execution here */
 	    sp->dval = t ? 1.0 : 0.0;
 	    break;
 
-	case A_LENGTH:
-	    dec_sp();
-	    sp->type = C_DOUBLE;
-	    sp->dval = (double) (((ARRAY) ((sp + 0)->ptr))->size);
-	    break;
-
 	case A_TEST:
 	    /* entry :  sp[0].ptr-> an array
 	       sp[-1]  is an expression
@@ -1092,7 +1178,7 @@ execute(INST * cdp,		/* code ptr, start execution here */
 		main_start = 0;
 		main_size = 0;
 	    }
-	    sp = eval_stack - 1;	/* might be in user function */
+	    sp = stack_under;	/* might be in user function */
 	    CLEAR_ALOOP_STACK();	/* ditto */
 	    break;
 
@@ -1138,6 +1224,8 @@ execute(INST * cdp,		/* code ptr, start execution here */
 		} else {
 		    set_field0(p, len);
 		    cdp = restart_label;
+		    if (cdp == NULL)
+			bozo("empty restart-label");
 		    rt_nr++;
 		    rt_fnr++;
 		}
@@ -1161,6 +1249,8 @@ execute(INST * cdp,		/* code ptr, start execution here */
 		} else {
 		    set_field0(p, len);
 		    cdp = restart_label;
+		    if (cdp == NULL)
+			bozo("empty restart-label");
 
 		    if (TEST2(NR) != TWO_DOUBLES)
 			cast2_to_d(NR);
@@ -1237,6 +1327,7 @@ execute(INST * cdp,		/* code ptr, start execution here */
 
 	    return;
 
+	case _CALLX:
 	case _CALL:
 
 	    /*  cdp[0] holds ptr to "function block"
@@ -1248,20 +1339,23 @@ execute(INST * cdp,		/* code ptr, start execution here */
 		int a_args = (cdp++)->op;	/* actual number of args */
 		CELL *nfp = sp - a_args + 1;	/* new fp for callee */
 		CELL *local_p = sp + 1;		/* first local argument on stack */
-		char *type_p = 0;	/* pts to type of an argument */
+		SYM_TYPE *type_p = 0;	/* pts to type of an argument */
 
-		if (fbp->nargs)
+		if (fbp->nargs) {
 		    type_p = fbp->typev + a_args - 1;
 
-		/* create space for locals */
-		t = fbp->nargs - a_args;	/* t is number of locals */
-		while (t > 0) {
-		    t--;
-		    inc_sp();
-		    type_p++;
-		    sp->type = C_NOINIT;
-		    if ((type_p) != 0 && (*type_p == ST_LOCAL_ARRAY))
-			sp->ptr = (PTR) new_ARRAY();
+		    /* create space for locals */
+		    t = fbp->nargs - a_args;	/* t is number of locals */
+		    while (t > 0) {
+			t--;
+			inc_sp();
+			type_p++;
+			if (*type_p == ST_LOCAL_ARRAY) {
+			    sp->ptr = (PTR) new_ARRAY();
+			} else {
+			    sp->type = C_NOINIT;
+			}
+		    }
 		}
 
 		execute(fbp->code, sp, nfp);
@@ -1476,7 +1570,7 @@ DB_cell_destroy(CELL *cp)
 static UInt
 d_to_index(double d)
 {
-    if (d >= Max_Int) {
+    if (d >= (double) Max_Int) {
 	return (UInt) Max_Int;
     } else if (d >= 0.0) {
 	return (UInt) (Int) (d);

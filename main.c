@@ -1,6 +1,6 @@
 /********************************************
 main.c
-copyright 2009-2014,2017 Thomas E. Dickey
+copyright 2009-2017,2024, Thomas E. Dickey
 copyright 1991-1995,2014, Michael D. Brennan
 
 This is a source file for mawk, an implementation of
@@ -11,16 +11,16 @@ the GNU General Public License, version 2, 1991.
 ********************************************/
 
 /*
- * $MawkId: main.c,v 1.31 2017/10/17 00:41:48 tom Exp $
+ * $MawkId: main.c,v 1.34 2024/09/04 20:28:21 tom Exp $
  */
 
-/*  main.c  */
+#define Visible_CELL
 
-#include "mawk.h"
-#include "bi_vars.h"
-#include "init.h"
-#include "code.h"
-#include "files.h"
+#include <mawk.h>
+#include <bi_vars.h>
+#include <init.h>
+#include <code.h>
+#include <files.h>
 
 #ifdef LOCALE
 #include <locale.h>
@@ -68,7 +68,7 @@ main(int argc, char **argv)
     parse();
 
     mawk_state = EXECUTION;
-    execute(execution_start, eval_stack - 1, 0);
+    execute(execution_start, NULL, NULL);
     /* never returns */
     return 0;
 }
@@ -76,6 +76,7 @@ main(int argc, char **argv)
 void
 mawk_exit(int x)
 {
+    TRACE(("mawk_exit(%d)\n", x));
 #ifdef  HAVE_REAL_PIPES
     close_out_pipes();		/* actually closes all output */
 #else

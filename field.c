@@ -1,6 +1,6 @@
 /********************************************
 field.c
-copyright 2008-2016,2020 Thomas E. Dickey
+copyright 2008-2023,2024 Thomas E. Dickey
 copyright 1991-1995,2014 Michael D. Brennan
 
 This is a source file for mawk, an implementation of
@@ -11,20 +11,23 @@ the GNU General Public License, version 2, 1991.
 ********************************************/
 
 /*
- * $MawkId: field.c,v 1.36 2020/01/20 11:47:26 tom Exp $
+ * $MawkId: field.c,v 1.46 2024/09/05 17:44:48 tom Exp $
  */
 
-/* field.c */
+#define Visible_CELL
+#define Visible_RE_DATA
+#define Visible_SEPARATOR
+#define Visible_STRING
+#define Visible_SYMTAB
 
-#include "mawk.h"
-#include "split.h"
-#include "field.h"
-#include "init.h"
-#include "memory.h"
-#include "scan.h"
-#include "bi_vars.h"
-#include "repl.h"
-#include "regexp.h"
+#include <mawk.h>
+#include <split.h>
+#include <field.h>
+#include <init.h>
+#include <memory.h>
+#include <scan.h>
+#include <bi_vars.h>
+#include <regexp.h>
 
 /* initial fields and pseudo fields,
     most programs only need these */
@@ -88,7 +91,8 @@ static void build_field0(void);
    If RS is changed, so is rs_shadow */
 SEPARATOR rs_shadow =
 {
-    SEP_CHAR, '\n', NULL
+    SEP_CHAR, '\n',
+    {NULL}
 };
 /* a splitting CELL version of FS */
 CELL fs_shadow =
@@ -106,13 +110,13 @@ set_rs_shadow(void)
     CELL c;
     STRING *sval;
     char *s;
-    SLen len;
+    size_t len;
 
     if (posix_space_flag && mawk_state == EXECUTION)
 	scan_code['\n'] = SC_UNEXPECTED;
 
     if (rs_shadow.type == SEP_STR) {
-	free_STRING((STRING *) rs_shadow.ptr);
+	free_STRING(rs_shadow.u.s_ptr);
     }
 
     cast_for_split(cellcpy(&c, RS));
@@ -124,11 +128,11 @@ set_rs_shadow(void)
 		rs_shadow.c = s[0];
 	    } else {
 		rs_shadow.type = SEP_STR;
-		rs_shadow.ptr = (PTR) new_STRING(s);
+		rs_shadow.u.s_ptr = new_STRING(s);
 	    }
 	} else {
 	    rs_shadow.type = SEP_RE;
-	    rs_shadow.ptr = c.ptr;
+	    rs_shadow.u.r_ptr = (RE_NODE *) c.ptr;
 	}
 	break;
 
@@ -142,7 +146,7 @@ set_rs_shadow(void)
 	    scan_code['\n'] = SC_SPACE;
 	rs_shadow.type = SEP_MLR;
 	sval = new_STRING("\n\n+");
-	rs_shadow.ptr = re_compile(sval);
+	rs_shadow.u.r_ptr = re_compile(sval);
 	free_STRING(sval);
 	break;
 
@@ -207,7 +211,7 @@ field_init(void)
 }
 
 void
-set_field0(char *s, size_t len)
+set_field0(const char *s, size_t len)
 {
     cell_destroy(&field[0]);
     nf = -1;
@@ -517,8 +521,8 @@ build_field0(void)
 	STRING *ofs, *tail;
 	size_t len;
 	register CELL *cp;
-	register char *p, *q;
 	int cnt;
+	register char *p;
 	CELL **fbp, *cp_limit;
 
 	cast1_to_s(cellcpy(&c, OFS));
@@ -539,12 +543,12 @@ build_field0(void)
 		    cp->ptr = (PTR) & null_str;
 		    null_str.ref_cnt++;
 		} else {	/* its a double */
-		    Int ival;
+		    Long ival;
 		    char xbuff[260];
 
-		    ival = d_to_I(cp->dval);
+		    ival = d_to_L(cp->dval);
 		    if (ival == cp->dval)
-			sprintf(xbuff, INT_FMT, ival);
+			sprintf(xbuff, LONG_FMT, ival);
 		    else
 			sprintf(xbuff, string(CONVFMT)->str, cp->dval);
 
@@ -571,7 +575,10 @@ build_field0(void)
 	fbp = fbankv;
 	cp = field + 1;
 	cp_limit = field + FBANK_SZ;
+
 	while (cnt-- > 0) {
+	    register char *q;
+
 	    memcpy(p, string(cp)->str, string(cp)->len);
 	    p += string(cp)->len;
 	    /* if not really string, free temp use of ptr */
@@ -612,11 +619,12 @@ slow_cell_assign(CELL *target, CELL *source)
 	size_t i;
 	for (i = 1; i < fbankv_num_chunks * FBANKV_CHUNK_SIZE; i++) {
 	    CELL *bank_start = fbankv[i];
-	    CELL *bank_end = bank_start + FBANK_SZ;
+	    CELL *bank_end;
 
 	    if (bank_start == 0)
 		break;
 
+	    bank_end = bank_start + FBANK_SZ;
 	    if (bank_start <= target && target < bank_end) {
 		/* it is a field */
 		field_assign(target, source);
@@ -630,7 +638,7 @@ slow_cell_assign(CELL *target, CELL *source)
 }
 
 int
-field_addr_to_index(CELL *cp)
+field_addr_to_index(const CELL *cp)
 {
     CELL **p = fbankv;
 
@@ -689,7 +697,7 @@ binmode(void)
    from environment or -W binmode=   */
 
 void
-set_binmode(int x)
+set_binmode(long x)
 {
     CELL c;
     int change = ((x & 4) == 0);
@@ -771,10 +779,10 @@ field_leaks(void)
 
     switch (rs_shadow.type) {
     case SEP_STR:
-	free_STRING(((STRING *) (&rs_shadow.ptr)));
+	free_STRING(rs_shadow.u.s_ptr);
 	break;
     case SEP_RE:
-	re_destroy(rs_shadow.ptr);
+	re_destroy(rs_shadow.u.r_ptr);
 	break;
     }
 }
